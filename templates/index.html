@@ -485,7 +485,25 @@ window.speechSynthesis.onvoiceschanged = () => {
     synthVoice = voices.find(v => v.name.includes("Google UK English Male") || v.name.includes("Microsoft Guy Online")) || voices[0];
 };
 
-document.getElementById('start-live-btn').addEventListener('click', function() {
+function requestMicrophonePermission() {
+    return navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(stream => {
+            // Stop the stream immediately after permission is granted
+            stream.getTracks().forEach(track => track.stop());
+            return true;
+        })
+        .catch(err => {
+            console.error('Microphone permission denied:', err);
+            alert('Microphone permission is required for the speech interview. Please allow microphone access and try again.');
+            return false;
+        });
+}
+
+document.getElementById('start-live-btn').addEventListener('click', async function() {
+    // Request microphone permission before entering fullscreen
+    const micGranted = await requestMicrophonePermission();
+    if (!micGranted) return;
+    
     document.getElementById('start-overlay').style.display = 'none';
     document.getElementById('live-interface').style.display = 'flex';
     document.documentElement.requestFullscreen().catch(e=>e);
@@ -537,12 +555,15 @@ function playAIVoice(textToSpeak) {
     utterance.onend = () => {
         if (aiSpeaking) {
             aiSpeaking = false;
-            startNativeListening();
+            // Add a short delay to prevent STT from capturing residual TTS audio
+            setTimeout(() => {
+                startNativeListening();
+            }, 500); // 500ms delay
         }
     };
     
     // Safety fallback: if TTS crashes in browser, start listening anyway after estimated time
-    let fallbackMs = Math.max(textToSpeak.length * 80, 3000);
+    let fallbackMs = Math.max(textToSpeak.length * 80, 3000) + 500; // Add 500ms for the delay
     setTimeout(() => {
         if (aiSpeaking && statusText.textContent === 'AI is speaking...') {
             aiSpeaking = false;
