@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AI Interviewer{% endblock %}</title>
+    <style>
+        :root{
+            --bg: #ffffff;
+            --panel: #f0f2f6;
+            --text: #31333f;
+            --muted: #666;
+            --accent: #ff4b4b;
+            --success: #52c41a;
+        }
+        [data-theme="dark"]{
+            --bg: #0f1724;
+            --panel: #0b1220;
+            --text: #e6eef8;
+            --muted: #9aa6bf;
+            --accent: #ff7b7b;
+            --success: #7ee787;
+        }
+
+        body {
+            font-family: 'Source Sans Pro', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .sidebar {
+            width: 300px;
+            background-color: var(--panel);
+            padding: 20px;
+            border-right: 1px solid rgba(0,0,0,0.06);
+            overflow-y: auto;
+            position: relative;
+        }
+        .main {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        .st-title {
+            font-size: 2.5rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #31333f;
+        }
+        .st-header {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #31333f;
+        }
+        .st-info {
+            background-color: rgba(14,165,233,0.06);
+            border: 1px solid rgba(14,165,233,0.12);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .st-success {
+            background-color: rgba(34,197,94,0.06);
+            border: 1px solid rgba(34,197,94,0.12);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .st-button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-size: 1rem;
+            margin: 0.5rem 0;
+        }
+        .st-button:hover {
+            background-color: #d4380d;
+        }
+        .st-file-uploader {
+            border-radius: 12px;
+            padding: 22px;
+            text-align: center;
+            margin: 1rem 0;
+            border: 2px dashed rgba(99,102,241,0.14);
+            background: linear-gradient(180deg, rgba(99,102,241,0.02), rgba(0,0,0,0.01));
+            box-shadow: 0 8px 28px rgba(2,6,23,0.06);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            flex-direction: column;
+            transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+            max-width: 720px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .st-file-uploader.dragover{
+            transform: translateY(-4px);
+            border-color: rgba(99,102,241,0.45);
+            box-shadow: 0 12px 36px rgba(2,6,23,0.09);
+        }
+        .file-input{display:none}
+        .file-label{
+            display:inline-flex;
+            align-items:center;
+            gap:10px;
+            padding:8px 12px;
+            border-radius:8px;
+            background:rgba(0,0,0,0.06);
+            color:var(--text);
+            cursor:pointer;
+            font-weight:600;
+        }
+        .file-icon{
+            width:56px;
+            height:56px;
+            display:inline-flex;
+            border-radius:10px;
+            background:rgba(99,102,241,0.12);
+            align-items:center;
+            justify-content:center;
+            font-size:22px;
+            color:rgba(99,102,241,0.98);
+        }
+        .file-name{font-size:0.95rem;color:var(--muted);max-width:520px;word-break:break-all}
+        .file-preview{margin-top:12px;display:flex;gap:8px;align-items:center;justify-content:center}
+        .file-chip{background:var(--panel);padding:8px 12px;border-radius:999px;display:inline-flex;gap:8px;align-items:center}
+        .remove-file{border:none;background:transparent;color:var(--muted);cursor:pointer;padding:4px 6px;border-radius:6px}
+        .upload-hint{font-size:0.9rem;color:var(--muted)}
+        .st-text {
+            margin-bottom: 1rem;
+        }
+        .video-container {
+            margin-top: 20px;
+        }
+        #video {
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 0.5rem;
+        }
+        .sidebar-bottom {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            text-align: center;
+        }
+        #sidebarVideo {
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 6px;
+            width: 100%;
+            height: auto;
+            max-height: 160px;
+            object-fit: cover;
+        }
+        .theme-toggle {
+            position: fixed;
+            top: 12px;
+            right: 12px;
+            width: 56px;
+            height: 32px;
+            padding: 4px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            background: rgba(0,0,0,0.06);
+            border: 1px solid rgba(0,0,0,0.08);
+            cursor: pointer;
+            z-index: 9999;
+            transition: background .2s, border-color .2s;
+        }
+        .theme-toggle .knob{
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+            transform: translateX(0);
+            transition: transform .18s ease, background .18s ease;
+        }
+        .theme-toggle.active{
+            background: rgba(255,255,255,0.12);
+            border-color: rgba(255,255,255,0.12);
+        }
+        [data-theme="dark"] .theme-toggle{
+            background: rgba(255,255,255,0.06);
+            border-color: rgba(255,255,255,0.08);
+        }
+        [data-theme="dark"] .theme-toggle .knob{
+            background: var(--panel);
+            transform: translateX(24px);
+        }
+    </style>
+</head>
+<body>
+    <button id="themeToggle" class="theme-toggle" aria-pressed="false" title="Toggle dark mode">
+        <span class="knob" aria-hidden="true"></span>
+    </button>
+    <div class="container">
+        <div class="sidebar">
+            {% block sidebar %}
+            <h3>AI Interviewer</h3>
+            <p>Navigate through the interview process</p>
+            {% endblock %}
+            {% if session.page == 'interview' %}
+            <div class="sidebar-bottom">
+                <video id="sidebarVideo" width="280" height="160" autoplay muted></video>
+            </div>
+            {% endif %}
+        </div>
+        <div class="main">
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+    <script>
+        // Theme persistence and visual toggle sync
+        (function(){
+            const btn = document.getElementById('themeToggle');
+            if(!btn) return;
+            const knob = btn.querySelector('.knob');
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            const stored = localStorage.getItem('theme');
+            const current = stored || (prefersDark ? 'dark' : 'light');
+
+            function applyTheme(t){
+                if(t === 'dark'){
+                    document.documentElement.setAttribute('data-theme','dark');
+                    btn.classList.add('active');
+                    btn.setAttribute('aria-pressed','true');
+                } else {
+                    document.documentElement.removeAttribute('data-theme');
+                    btn.classList.remove('active');
+                    btn.setAttribute('aria-pressed','false');
+                }
+            }
+
+            applyTheme(current);
+
+            btn.addEventListener('click', ()=>{
+                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+                const newTheme = isDark ? 'light' : 'dark';
+                applyTheme(newTheme);
+                localStorage.setItem('theme', newTheme);
+            });
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
