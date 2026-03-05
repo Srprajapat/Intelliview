@@ -234,7 +234,7 @@
             <div class="col-md-3">
                 <div class="metric-card">
                     <i class="fas fa-calculator fa-2x text-primary mb-2"></i>
-                    <div class="metric-value {{ 'score-excellent' if state.total_score|default(0) > 60 else 'score-poor' }}">{{ "%.1f"|format(state.total_score|default(0)) }}/100</div>
+                    <div class="metric-value {{ 'score-excellent' if state.total_score|default(0) > 60 else 'score-poor' }}" id="result-total-score">{{ "%.1f"|format(state.total_score|default(0)) }}/100</div>
                     <div class="metric-label">Total Score</div>
                 </div>
             </div>
@@ -255,7 +255,7 @@
             <div class="col-md-3">
                 <div class="metric-card">
                     <i class="fas fa-shield-alt fa-2x text-warning mb-2"></i>
-                    <div class="metric-value">{{ "%.1f"|format(state.integrity|default(100)) }}%</div>
+                    <div class="metric-value" id="result-integrity-value">{{ "%.1f"|format(state.integrity|default(100)) }}%</div>
                     <div class="metric-label">Integrity</div>
                 </div>
             </div>
@@ -278,11 +278,26 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
-    document.addEventListener('contextmenu', e => e.preventDefault());
-    document.addEventListener('copy', e => e.preventDefault());
-    document.addEventListener('paste', e => e.preventDefault());
+    // Global function to handle interview violations
+    function endInterviewDueToViolation(reason) {
+        if (!window.interviewStarted) return;
+        window.interviewStarted = false;
+        // Stop any ongoing processes
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        if (window.currentUtterance) window.currentUtterance = null;
+        alert("Interview violation: " + reason);
+        fetch('/end_interview', { method: 'POST' }).then(() => window.location.href = '/result');
+    }
+
+    document.addEventListener('contextmenu', e => { e.preventDefault(); endInterviewDueToViolation('Right-click detected'); });
+    document.addEventListener('copy', e => { e.preventDefault(); endInterviewDueToViolation('Copy attempted'); });
+    document.addEventListener('paste', e => { e.preventDefault(); endInterviewDueToViolation('Paste attempted'); });
+    document.addEventListener('cut', e => { e.preventDefault(); endInterviewDueToViolation('Cut attempted'); });
     document.addEventListener('keydown', e => {
-        if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) || (e.ctrlKey && e.key === 'u')) { e.preventDefault(); }
+        if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) || (e.ctrlKey && e.key === 'u')) { 
+            e.preventDefault(); 
+            endInterviewDueToViolation('Developer tools opened');
+        }
     });
 </script>
 
@@ -413,12 +428,16 @@ function initializeInterview() {
 function loadQuestion() {
     fetch('/get_current_question').then(r => r.json()).then(data => {
         if(data.question) {
-            document.getElementById('questions-list').innerHTML = `<strong>Question ${data.current_question} of ${data.total_questions}:</strong> <br> ${marked.parse(data.question)}`;
+            // Escape HTML in question text to prevent execution of embedded tags
+            const escapeHtml = (str) => str.replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+            const safeQuestion = escapeHtml(data.question);
+            document.getElementById('questions-list').innerHTML = `<strong>Question ${data.current_question} of ${data.total_questions}:</strong> <br> ${marked.parse(safeQuestion)}`;
             let optHtml = '<div class="st-header" style="margin-bottom:15px;">Select Answer:</div>';
             // Check if options exist and actually contain more than 1 character to weed out "a", "b" arrays
             if (data.options && data.options.length > 0 && data.options[0].length > 2) {
                 data.options.forEach((opt, idx) => {
-                    optHtml += `<div class="form-check mb-3 d-flex"><input id="opt${idx}" class="form-check-input me-2" type="radio" name="ans" value="${idx}" onchange="submitAnswer(${idx})"><label for="opt${idx}" class="form-check-label text-white cursor-pointer" style="flex:1;">${opt}</label></div>`;
+                    const safeOpt = escapeHtml(opt);
+                    optHtml += `<div class="form-check mb-3 d-flex"><input id="opt${idx}" class="form-check-input me-2" type="radio" name="ans" value="${idx}" onchange="submitAnswer(${idx})"><label for="opt${idx}" class="form-check-label text-white cursor-pointer" style="flex:1;">${safeOpt}</label></div>`;
                 });
             } else {
                 // Safeguard: Allow the candidate to skip broken questions
@@ -458,227 +477,535 @@ function loadStats() {
 <script>
 // --- Native Web Speech API Setup ---
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
 if (!SpeechRecognition) {
-    alert("Browser unsupported for Live Voice. Please use Chrome/Edge.");
+    alert("Browser unsupported. Use Chrome or Edge.");
 }
 
 const recognition = new SpeechRecognition();
-recognition.continuous = true;  // Keep listening until we manually stop it to avoid cutting user off
-recognition.interimResults = true; // Show text as they talk
-recognition.lang = 'en-US';
+
+recognition.continuous = true;
+recognition.interimResults = true;
+recognition.lang = "en-US";
 
 let currentSpeechQuestion = 0;
-window.interviewStarted = true;
-let finalTranscriptToSubmit = "";
-let silenceTimer = null; 
-let synthVoice = null;
+let finalTranscript = "";
+let interimTranscript = "";
 
-const orb = document.getElementById('ai-orb');
-const orbIcon = document.getElementById('orb-icon');
-const statusText = document.getElementById('status-text');
-const transcriptText = document.getElementById('transcript-text');
-
-// Prep Native Text-to-Speech voices
-window.speechSynthesis.onvoiceschanged = () => {
-    const voices = window.speechSynthesis.getVoices();
-    // Try to find a premium/natural English voice
-    synthVoice = voices.find(v => v.name.includes("Google UK English Male") || v.name.includes("Microsoft Guy Online")) || voices[0];
-};
-
-function requestMicrophonePermission() {
-    return navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(stream => {
-            // Stop the stream immediately after permission is granted
-            stream.getTracks().forEach(track => track.stop());
-            return true;
-        })
-        .catch(err => {
-            console.error('Microphone permission denied:', err);
-            alert('Microphone permission is required for the speech interview. Please allow microphone access and try again.');
-            return false;
-        });
-}
-
-document.getElementById('start-live-btn').addEventListener('click', async function() {
-    // Request microphone permission before entering fullscreen
-    const micGranted = await requestMicrophonePermission();
-    if (!micGranted) return;
-    
-    document.getElementById('start-overlay').style.display = 'none';
-    document.getElementById('live-interface').style.display = 'flex';
-    document.documentElement.requestFullscreen().catch(e=>e);
-    initializeSpeechCamera();
-    fetchInitialQuestion();
-});
-
-function updateUI(state, text) {
-    orb.className = 'ai-orb';
-    if (text) transcriptText.innerHTML = text;
-    
-    if (state === 'speaking') {
-        orb.classList.add('orb-speaking'); orbIcon.className = 'fas fa-robot fa-2x'; statusText.textContent = 'AI is speaking...';
-    } else if (state === 'listening') {
-        orb.classList.add('orb-listening'); orbIcon.className = 'fas fa-microphone fa-2x'; statusText.textContent = 'Listening (Speak now)...';
-    } else if (state === 'processing') {
-        orb.classList.add('orb-processing'); orbIcon.className = 'fas fa-circle-notch fa-spin fa-2x'; statusText.textContent = 'Thinking...';
-    }
-}
-
-function fetchInitialQuestion() {
-    updateUI('processing', "Preparing the interview...");
-    fetch('/get_speech_question').then(r => r.json()).then(data => {
-        if (data.question) {
-            currentSpeechQuestion = data.current_question - 1;
-            playAIVoice("Welcome to the spoken phase. Question " + data.current_question + " of " + data.total_questions + ": " + data.question);
-        } else {
-            fetch('/end_interview', { method: 'POST' }).then(() => window.location.href = '/result');
-        }
-    });
-}
+let silenceTimer = null;
+let answerSubmitting = false;
 
 let aiSpeaking = false;
+let synthVoice = null;
 
-function playAIVoice(textToSpeak) {
+window.currentUtterance = null;
+window.interviewStarted = true;
+
+
+const orb = document.getElementById("ai-orb");
+const orbIcon = document.getElementById("orb-icon");
+const statusText = document.getElementById("status-text");
+const transcriptText = document.getElementById("transcript-text");
+
+
+/* ---------------------- */
+/* Load Voices */
+/* ---------------------- */
+
+function loadVoices() {
+
+    const voices = speechSynthesis.getVoices();
+
+    synthVoice =
+        voices.find(v => v.name.includes("Google UK English Male")) ||
+        voices.find(v => v.name.includes("Microsoft")) ||
+        voices[0];
+}
+
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+
+/* ---------------------- */
+/* Microphone Permission */
+/* ---------------------- */
+
+function requestMicrophonePermission() {
+
+    return navigator.mediaDevices.getUserMedia({
+
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+        }
+
+    }).then(stream => {
+
+        stream.getTracks().forEach(track => track.stop());
+        return true;
+
+    }).catch(err => {
+
+        alert("Microphone permission required.");
+        return false;
+
+    });
+
+}
+
+
+/* ---------------------- */
+/* UI Updates */
+/* ---------------------- */
+
+function updateUI(state, text) {
+
+    orb.className = "ai-orb";
+
+    if (text) transcriptText.innerHTML = text;
+
+    if (state === "speaking") {
+
+        orb.classList.add("orb-speaking");
+        orbIcon.className = "fas fa-robot fa-2x";
+        statusText.textContent = "AI speaking...";
+
+    }
+
+    else if (state === "listening") {
+
+        orb.classList.add("orb-listening");
+        orbIcon.className = "fas fa-microphone fa-2x";
+        statusText.textContent = "Listening...";
+
+    }
+
+    else if (state === "processing") {
+
+        orb.classList.add("orb-processing");
+        orbIcon.className = "fas fa-circle-notch fa-spin fa-2x";
+        statusText.textContent = "Thinking...";
+
+    }
+
+}
+
+
+/* ---------------------- */
+/* Start Interview */
+/* ---------------------- */
+
+document.getElementById("start-live-btn").addEventListener("click", async () => {
+
+    const mic = await requestMicrophonePermission();
+
+    if (!mic) return;
+
+    document.getElementById("start-overlay").style.display = "none";
+    document.getElementById("live-interface").style.display = "flex";
+
+    document.documentElement.requestFullscreen().catch(()=>{});
+
+    initializeSpeechCamera();
+    fetchInitialQuestion();
+
+});
+
+
+/* ---------------------- */
+/* AI Voice */
+/* ---------------------- */
+
+function playAIVoice(text) {
+
     aiSpeaking = true;
-    // Cancel any ongoing speech and recognition
-    window.speechSynthesis.cancel();
-    try { recognition.stop(); } catch(e) {}
+
+    speechSynthesis.cancel();
+
+    try { recognition.abort(); } catch(e) {}
+
     clearTimeout(silenceTimer);
-    
-    updateUI('speaking', `<strong>AI:</strong> ${textToSpeak}`);
-    
-    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+
+    updateUI("speaking", "<strong>AI:</strong> " + text);
+
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    window.currentUtterance = utterance;
+
     if (synthVoice) utterance.voice = synthVoice;
+
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
-    
+
     utterance.onend = () => {
-        if (aiSpeaking) {
-            aiSpeaking = false;
-            // Add a short delay to prevent STT from capturing residual TTS audio
-            setTimeout(() => {
-                startNativeListening();
-            }, 500); // 500ms delay
-        }
+
+        aiSpeaking = false;
+
+        setTimeout(startListening, 800);
+
     };
-    
-    // Safety fallback: if TTS crashes in browser, start listening anyway after estimated time
-    let fallbackMs = Math.max(textToSpeak.length * 80, 3000) + 500; // Add 500ms for the delay
-    setTimeout(() => {
-        if (aiSpeaking && statusText.textContent === 'AI is speaking...') {
-            aiSpeaking = false;
-            startNativeListening();
-        }
-    }, fallbackMs);
 
-    window.speechSynthesis.speak(utterance);
+    utterance.onerror = () => {
+
+        aiSpeaking = false;
+        startListening();
+
+    };
+
+    speechSynthesis.speak(utterance);
+
 }
 
-function startNativeListening() {
-    // Guard: don't start listening if AI is still speaking
+
+/* ---------------------- */
+/* Start Listening */
+/* ---------------------- */
+
+function startListening() {
+
     if (aiSpeaking) return;
-    updateUI('listening', "<em>I am listening...</em>");
-    finalTranscriptToSubmit = "";
-    clearTimeout(silenceTimer);
-    
-    try {
-        recognition.start();
-    } catch (err) {}
 
-    // Initial silent timeout (if they don't say anything for 30 seconds)
-    silenceTimer = setTimeout(() => {
-        recognition.stop();
-        submitSpeechTextAnswer("");
-    }, 30000);
+    updateUI("listening", "<em>Listening...</em>");
+
+    finalTranscript = "";
+    interimTranscript = "";
+
+    clearTimeout(silenceTimer);
+
+    try { recognition.abort(); } catch(e) {}
+
+    setTimeout(()=>{
+
+        try { recognition.start(); } catch(e) {}
+
+    },100);
+
 }
+
+
+/* ---------------------- */
+/* Smart Silence */
+/* ---------------------- */
+
+function resetSilenceTimer() {
+
+    clearTimeout(silenceTimer);
+
+    let words = finalTranscript.split(" ").length;
+
+    let timeout = 5000;
+
+    if (words > 10) timeout = 7000;
+    if (words > 25) timeout = 9000;
+
+    silenceTimer = setTimeout(()=>{
+
+        try { recognition.abort(); } catch(e) {}
+
+        submitAnswer(finalTranscript);
+
+    }, timeout);
+
+}
+
+
+/* ---------------------- */
+/* Real Time Word Streaming */
+/* ---------------------- */
 
 recognition.onresult = (event) => {
-    // They spoke! Clear the silent timeout
-    clearTimeout(silenceTimer);
-    
-    let interimTranscript = '';
-    let finalTranscript = '';
 
-    for (let i = event.resultIndex; i < event.results.length; ++i) {
+    if (aiSpeaking) return;
+    if (speechSynthesis.speaking) return;
+
+    interimTranscript = "";
+
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+
+        const text = event.results[i][0].transcript;
+
         if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
-        } else {
-            interimTranscript += event.results[i][0].transcript;
-        }
-    }
-    
-    finalTranscriptToSubmit += finalTranscript;
-    let displayHtml = `<strong>You:</strong> ${finalTranscriptToSubmit} <i style="color:#6b7280;">${interimTranscript}</i>`;
-    transcriptText.innerHTML = displayHtml;
 
-    // Set a new silence timer. If they stop talking for 3 seconds, assume answer is complete.
-    silenceTimer = setTimeout(() => {
-        recognition.stop();
-        submitSpeechTextAnswer(finalTranscriptToSubmit + interimTranscript);
-    }, 3000);
+            finalTranscript += text + " ";
+
+        }
+
+        else {
+
+            interimTranscript += text;
+
+        }
+
+    }
+
+    transcriptText.innerHTML =
+        `<strong>You:</strong> 
+        <span style="color:black;font-weight:600;">${finalTranscript}</span>
+        <span style="color:#9ca3af;">${interimTranscript}</span>`;
+
+    resetSilenceTimer();
+
 };
+
+
+/* ---------------------- */
+/* Auto Restart Recognition */
+/* ---------------------- */
+
+recognition.onend = () => {
+
+    if (!aiSpeaking && window.interviewStarted) {
+
+        try { recognition.start(); } catch(e) {}
+
+    }
+
+};
+
+
+/* ---------------------- */
+/* Recognition Errors */
+/* ---------------------- */
 
 recognition.onerror = (event) => {
-    if (event.error === 'no-speech') {
+
+    if (event.error === "no-speech") {
+
         clearTimeout(silenceTimer);
-        submitSpeechTextAnswer("");
+        submitAnswer("");
+
     }
+
 };
 
-function submitSpeechTextAnswer(textAnswer) {
-    if(statusText.textContent === 'Thinking...') return; // Prevent double submit
+
+/* ---------------------- */
+/* Submit Answer */
+/* ---------------------- */
+
+function submitAnswer(text) {
+
+    if (answerSubmitting) return;
+
+    answerSubmitting = true;
+
     clearTimeout(silenceTimer);
-    updateUI('processing', `<strong>You said:</strong> ${textAnswer || "..."}`);
-    
-    fetch('/submit_speech_answer', { 
-        method: 'POST', 
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ answer_text: textAnswer }) 
-    }).then(r => r.json()).then(data => {
-        
-        if (data.empty_audio) { 
-            playAIVoice(data.message); 
-            return; 
+
+    try { recognition.abort(); } catch(e) {}
+
+    updateUI("processing", `<strong>You said:</strong> ${text || "..."}`);
+
+    fetch("/submit_speech_answer",{
+
+        method:"POST",
+
+        headers:{
+            "Content-Type":"application/json"
+        },
+
+        body:JSON.stringify({
+            answer_text:text
+        })
+
+    })
+
+    .then(r=>r.json())
+
+    .then(data=>{
+
+        answerSubmitting = false;
+
+        if (data.empty_audio) {
+
+            playAIVoice(data.message);
+            return;
+
         }
-        
-        const feedback = data.correct ? "Good answer. " : "Not quite what I was looking for. ";
-        fetch('/get_speech_question').then(r => r.json()).then(nextData => {
-            if (nextData.question) {
-                currentSpeechQuestion = nextData.current_question - 1;
-                playAIVoice(feedback + "Question " + nextData.current_question + " of " + nextData.total_questions + ": " + nextData.question);
-            } else {
-                updateUI('processing', "Interview Complete! Generating your report...");
-                setTimeout(() => { fetch('/end_interview', { method: 'POST' }).then(() => window.location.href = '/result'); }, 2000);
+
+        const feedback = data.correct
+            ? "Good answer. "
+            : "Not quite correct. ";
+
+        fetch("/get_speech_question")
+
+        .then(r=>r.json())
+
+        .then(next=>{
+
+            if (next.question) {
+
+                playAIVoice(
+                    feedback +
+                    "Question " +
+                    next.current_question +
+                    " of " +
+                    next.total_questions +
+                    ": " +
+                    next.question
+                );
+
             }
+
+            else {
+
+                updateUI("processing","Interview Complete");
+
+                setTimeout(()=>{
+
+                    fetch("/end_interview",{method:"POST"})
+                    .then(()=>window.location.href="/result");
+
+                },2000);
+
+            }
+
         });
+
+    })
+
+    .catch(()=>{
+
+        answerSubmitting = false;
+        playAIVoice("Network error. Please repeat.");
+
     });
+
 }
 
-function initializeSpeechCamera() {
-    var video = document.getElementById('video'), canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
-    navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
-        video.srcObject = stream; video.style.display = 'block'; document.getElementById('status').style.display='none';
-        setInterval(() => {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            fetch('/process_frame', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: canvas.toDataURL('image/jpeg') }) });
+
+/* ---------------------- */
+/* Fetch First Question */
+/* ---------------------- */
+
+function fetchInitialQuestion(){
+
+    updateUI("processing","Preparing interview...");
+
+    fetch("/get_speech_question")
+
+    .then(r=>r.json())
+
+    .then(data=>{
+
+        if(data.question){
+
+            playAIVoice(
+                "Welcome. Question " +
+                data.current_question +
+                " of " +
+                data.total_questions +
+                ": " +
+                data.question
+            );
+
+        }
+
+    });
+
+}
+
+
+/* ---------------------- */
+/* Camera */
+/* ---------------------- */
+
+function initializeSpeechCamera(){
+
+    const video=document.getElementById("video");
+    const canvas=document.getElementById("canvas");
+
+    const ctx=canvas.getContext("2d");
+
+    navigator.mediaDevices.getUserMedia({video:true})
+
+    .then(stream=>{
+
+        video.srcObject=stream;
+        video.style.display = 'block';
+        document.getElementById('status').style.display='none';
+
+        setInterval(()=>{
+
+            if(!window.interviewStarted) return;
+
+            ctx.drawImage(video,0,0,canvas.width,canvas.height);
+
+            fetch("/process_frame",{
+
+                method:"POST",
+
+                headers:{
+                    "Content-Type":"application/json"
+                },
+
+                body:JSON.stringify({
+                    image:canvas.toDataURL("image/jpeg")
+                })
+
+            });
+
+            // update scores while in speech phase
             fetch('/get_stats').then(r=>r.json()).then(d=>{
                 document.getElementById('mcq-score').textContent = d.mcq_score.toFixed(1);
                 document.getElementById('speech-score').textContent = d.speech_score.toFixed(1);
+                document.getElementById('integrity-score').textContent = d.integrity.toFixed(1);
+                document.getElementById('integrity').textContent = d.violations;
             });
-        }, 1000);
+
+        },2000);
+
     });
+
 }
 
-function endInterviewDueToViolation(reason) {
+
+/* ---------------------- */
+/* Security */
+/* ---------------------- */
+
+function endInterviewDueToViolation(reason){
+
     if(!window.interviewStarted) return;
-    window.interviewStarted = false; 
-    try { recognition.stop(); } catch(e) {}
-    window.speechSynthesis.cancel(); // Stop AI Voice immediately
-    alert(`⚠️ Interview Violation: ${reason}`);
-    fetch('/end_interview', { method: 'POST' }).then(() => window.location.href = '/result');
+
+    window.interviewStarted=false;
+
+    try{recognition.abort()}catch(e){}
+
+    speechSynthesis.cancel();
+
+    alert("Interview violation: "+reason);
+
+    fetch("/end_interview",{method:"POST"})
+    .then(()=>window.location.href="/result");
+
 }
-document.addEventListener('fullscreenchange', () => { if (window.interviewStarted && !document.fullscreenElement) endInterviewDueToViolation('Fullscreen exited'); });
-document.addEventListener('visibilitychange', () => { if (window.interviewStarted && document.hidden) endInterviewDueToViolation('Tab switched'); });
+
+document.addEventListener("fullscreenchange",()=>{
+
+    if(window.interviewStarted && !document.fullscreenElement)
+        endInterviewDueToViolation("Fullscreen exited");
+
+});
+
+document.addEventListener("visibilitychange",()=>{
+
+    if(window.interviewStarted && document.hidden)
+        endInterviewDueToViolation("Tab switched");
+
+});
+
+// Additional security: prevent copy, paste, cut, right-click, and developer tools
+document.addEventListener('contextmenu', e => { e.preventDefault(); endInterviewDueToViolation('Right-click detected'); });
+document.addEventListener('copy', e => { e.preventDefault(); endInterviewDueToViolation('Copy attempted'); });
+document.addEventListener('paste', e => { e.preventDefault(); endInterviewDueToViolation('Paste attempted'); });
+document.addEventListener('cut', e => { e.preventDefault(); endInterviewDueToViolation('Cut attempted'); });
+document.addEventListener('keydown', e => {
+    if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) || (e.ctrlKey && e.key === 'u')) { 
+        e.preventDefault(); 
+        endInterviewDueToViolation('Developer tools opened');
+    }
+});
 </script>
 {% endif %}
 
@@ -693,6 +1020,12 @@ if (chartCtx) {
         options: { responsive: true, plugins: { legend: { position: 'top' } }, rotation: -90 }
     });
 }
+
+// ensure integrity reflects latest value even if server computed differently
+fetch('/get_stats').then(r=>r.json()).then(d=>{
+    var integElem = document.getElementById('result-integrity-value');
+    if (integElem) integElem.textContent = d.integrity.toFixed(1) + '%';
+});
 </script>
 {% endif %}
 {% endblock %}

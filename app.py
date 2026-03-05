@@ -214,12 +214,32 @@ class ProctoringProcessor:
         img = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+        # Check image brightness
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray)
+        logging.debug(f"Image brightness: {brightness:.2f}")
+        if brightness < 50:  # Too dark
+            logging.warning("Image too dark for face detection")
+
+        # Check image blur
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        logging.debug(f"Image blur (Laplacian variance): {laplacian_var:.2f}")
+        if laplacian_var < 100:  # Blurry
+            logging.warning("Image too blurry for face detection")
+
         prohibited_objects = self.detect_objects(img)
-        if prohibited_objects: self.integrity_deducted += 3 
+        if prohibited_objects:
+            self.integrity_deducted += 3 
+            logging.info(f"Integrity deducted 3 for prohibited objects: {prohibited_objects}")
 
         face_locations = face_recognition.face_locations(rgb, model="hog")
-        if len(face_locations) == 0: self.integrity_deducted += 2
-        elif len(face_locations) > 1: self.integrity_deducted += 2
+        logging.debug(f"Face detection: {len(face_locations)} faces found")
+        if len(face_locations) == 0:
+            self.integrity_deducted += 2
+            logging.info("Integrity deducted 2 due to no face detected")
+        elif len(face_locations) > 1:
+            self.integrity_deducted += 2
+            logging.info("Integrity deducted 2 due to multiple faces detected")
         else:
             try:
                 landmarks = face_recognition.face_landmarks(rgb)[0]
@@ -237,7 +257,9 @@ class ProctoringProcessor:
                 if yaw is not None and pitch is not None:
                     pose_gaze_away = abs(yaw) > 35 or abs(pitch) > 25
                 
-                if eye_gaze_away or pose_gaze_away: self.gaze_away += 1
+                if eye_gaze_away or pose_gaze_away: 
+                    self.gaze_away += 1
+                    logging.info(f"Gaze away detected (eye:{eye_gaze_away},pose:{pose_gaze_away})")
             except Exception: pass
         return frame_data, self.integrity_deducted, self.gaze_away
 
@@ -620,8 +642,12 @@ def process_frame():
     if not sid: session['sid'] = sid = uuid.uuid4().hex
     if sid not in proctor_processors: proctor_processors[sid] = ProctoringProcessor()
     _, ided, gaway = proctor_processors[sid].process_frame(request.get_json()['image'])
-    session['integrity_deducted'] = int(ided or 0)
+    prev = session.get('integrity_deducted', 0)
+    new_val = int(ided or 0)
+    session['integrity_deducted'] = new_val
     session['gaze_away'] = int(gaway or 0)
+    if new_val != prev:
+        logging.info(f"Session integrity changed from {prev} to {new_val}")
     return jsonify({'integrity_deducted': ided, 'gaze_away': gaway})
 
 @app.route('/get_current_question')
