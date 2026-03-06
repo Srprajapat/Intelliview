@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser, JsonOutputParser
+from langchain_core.utils.json import parse_json_markdown
 from document_extractor import extract_text_auto  
 import warnings
 from werkzeug.utils import secure_filename
@@ -143,7 +144,7 @@ llm_resume = ChatGroq(model="moonshotai/kimi-k2-instruct-0905", max_retries=3, t
 
 llm_mcq = ChatGroq(model="llama-3.1-8b-instant", max_retries=3, temperature=0.7)
 
-llm_speech = ChatGroq(model="llama-3.1-8b-instant", max_retries=3, temperature=0.7)
+llm_speech = ChatGroq(model="llama-3.3-70b-versatile", max_retries=3, temperature=0.7)
 
 
 app = Flask(__name__)
@@ -170,7 +171,6 @@ class ProctoringProcessor:
         ])
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1)) 
-        # gaze tracker instance
         self.gaze_tracker = GazeTracker()
 
     def detect_objects(self, img):
@@ -301,9 +301,11 @@ class MCQ(BaseModel):
     question_level: Literal['surface','deep level 1', 'deep level 2']
 
 class v_question(BaseModel):
-    surface_level : MCQ = Field(description="Surface level question generated based on topic")
-    deep_level_1 : MCQ = Field(description="Deep level 1 question generated based on topic")
-    deep_level_2 : MCQ = Field(description="Deep level 2 question generated based on topic")
+    topic: str
+    question: str
+    options: List[str] = Field(min_length=4, max_length=4)
+    correct_answer: str
+    question_level: str
 
 class customState(BaseModel):
     resume :  Optional[str] = Field(default=None)
@@ -392,56 +394,46 @@ def r_p2s1(state) -> dict:
     parsed_obj = safe_llm_invoke(llm_mcq, messages, structured=required_question)
     return {"required_question": parsed_obj.questions, "max_score": len(parsed_obj.questions) * 10}
 
-def v_p2s1(state) -> dict:
-    """Generate verification questions using plain JSON (not tool calling) to avoid tool_use_failed errors."""
-    import re as _re
-    state = state.model_dump()
-    topics = state['verification_topics'] if state['verification_topics'] else state['jd_topics']
-    topics = topics[:5]  # Limit topics to avoid token overflow
-    system_prompt = """Generate verification MCQ questions. Return ONLY valid JSON (no markdown, no explanation).
-Format:
-{"questions": [
-  {
-    "surface_level": {"question": "...", "options": ["A text", "B text", "C text", "D text"], "correct_answer": "exact text of correct option", "topic": "...", "question_level": "surface"},
-    "deep_level_1": {"question": "...", "options": ["A text", "B text", "C text", "D text"], "correct_answer": "exact text of correct option", "topic": "...", "question_level": "deep level 1"},
-    "deep_level_2": {"question": "...", "options": ["A text", "B text", "C text", "D text"], "correct_answer": "exact text of correct option", "topic": "...", "question_level": "deep level 2"}
-  }
-]}
-Rules: Each topic = 1 entry with 3 levels. Options = 4 full sentences. correct_answer must exactly match one option."""
-    messages = [SystemMessage(content=system_prompt), HumanMessage(content=f"Topics: {topics}")]
-    time.sleep(2)  # Delay to avoid rate limiting
+class verification_questions(BaseModel):
+    questions: List[v_question]
 
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            response = safe_llm_invoke(llm_speech, messages)  # Plain text, NO structured output
-            content = response.content.strip()
-            logging.debug(f"v_p2s1 raw response (attempt {attempt}): {content[:500]}")
-            # Extract JSON object from response (skip any markdown fences or text)
-            json_match = _re.search(r'\{[\s\S]*\}', content)
-            if not json_match:
-                raise ValueError("No JSON object found in LLM response")
-            parsed = json.loads(json_match.group())
-            raw_questions = parsed.get('questions', [])
-            if not raw_questions:
-                raise ValueError("Empty questions list in parsed JSON")
-            v_questions = []
-            for q in raw_questions:
-                v_q = v_question(
-                    surface_level=MCQ(**q['surface_level']),
-                    deep_level_1=MCQ(**q['deep_level_1']),
-                    deep_level_2=MCQ(**q['deep_level_2'])
-                )
-                v_questions.append(v_q)
-            logging.info(f"v_p2s1 SUCCESS: Generated {len(v_questions)} verification question sets")
-            return {"verification_question": v_questions, "max_score": len(v_questions) * 10}
-        except Exception as e:
-            last_error = e
-            logging.warning(f"v_p2s1 JSON parse attempt {attempt}/3 failed: {e}")
-            time.sleep(2)
-    # If all parse attempts fail, return empty so interview can still proceed with required questions only
-    logging.error(f"v_p2s1 FAILED all attempts: {last_error}")
-    return {"verification_question": [], "max_score": 0}
+def v_p2s1(state) -> dict:
+    state = state.model_dump()
+
+    topics = state['verification_topics'] if len(state['verification_topics']) > 0 else state['jd_topics']
+
+    topics = topics[:8]  # prevent token overflow
+
+    system_prompt = """
+    Generate MCQ interview questions.
+
+    For EACH topic generate exactly 3 questions:
+    1 surface
+    1 deep level 1
+    1 deep level 2
+
+    Rules:
+    - options must contain exactly 4 answers
+    - correct_answer must be exactly one of the options
+    - question_level must be one of: surface, deep level 1, deep level 2
+
+    Return JSON with key "questions".
+    """
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Topics: {topics}")
+    ]
+
+    parsed_obj = safe_llm_invoke(
+        llm_speech,
+        messages,
+        structured=verification_questions
+    )
+
+    return {
+        "verification_question": parsed_obj.questions,
+        "max_score": len(parsed_obj.questions) * 10
+    }
 
 def build_graph1():
     graph1 = StateGraph(customState)
