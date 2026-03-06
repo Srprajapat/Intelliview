@@ -11,8 +11,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage, SystemMessage, BaseMessage
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser, JsonOutputParser
-from document_extractor import extract_text_auto  # Assuming you have this locally
-import face_recognition
+from document_extractor import extract_text_auto  
 import warnings
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
@@ -21,6 +20,7 @@ import json
 from ultralytics import YOLO
 import logging
 import time
+from gaze_tracker import GazeTracker
 
 logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -170,6 +170,8 @@ class ProctoringProcessor:
         ])
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1)) 
+        # gaze tracker instance
+        self.gaze_tracker = GazeTracker()
 
     def detect_objects(self, img):
         prohibited_objects = []
@@ -232,35 +234,39 @@ class ProctoringProcessor:
             self.integrity_deducted += 3 
             logging.info(f"Integrity deducted 3 for prohibited objects: {prohibited_objects}")
 
-        face_locations = face_recognition.face_locations(rgb, model="hog")
-        logging.debug(f"Face detection: {len(face_locations)} faces found")
-        if len(face_locations) == 0:
-            self.integrity_deducted += 2
-            logging.info("Integrity deducted 2 due to no face detected")
-        elif len(face_locations) > 1:
-            self.integrity_deducted += 2
-            logging.info("Integrity deducted 2 due to multiple faces detected")
-        else:
-            try:
-                landmarks = face_recognition.face_landmarks(rgb)[0]
-                lx = sum(p[0] for p in landmarks["left_eye"]) / len(landmarks["left_eye"])
-                rx = sum(p[0] for p in landmarks["right_eye"]) / len(landmarks["right_eye"])
-                eye_center = (lx + rx) / 2
-                h, w, _ = img.shape
-                
-                # TUNED GAZE BOUNDARIES (30% to 70%)
-                eye_gaze_away = eye_center < w * 0.30 or eye_center > w * 0.70
-                
-                # TUNED HEAD POSE BOUNDARIES
-                yaw, pitch = self.estimate_head_pose(landmarks, img.shape)
-                pose_gaze_away = False
-                if yaw is not None and pitch is not None:
-                    pose_gaze_away = abs(yaw) > 35 or abs(pitch) > 25
-                
-                if eye_gaze_away or pose_gaze_away: 
-                    self.gaze_away += 1
-                    logging.info(f"Gaze away detected (eye:{eye_gaze_away},pose:{pose_gaze_away})")
-            except Exception: pass
+        try:
+
+            gaze_info, annotated_img = self.gaze_tracker.process_frame(img)
+
+            img = annotated_img
+
+            faces = gaze_info.get("faces",0)
+
+            if faces == 0:
+                self.integrity_deducted += 2
+                logging.info("Integrity deducted 2 due to no face detected")
+
+            elif faces > 1:
+                self.integrity_deducted += 2
+                logging.info("Integrity deducted 2 due to multiple faces detected")
+
+            direction = gaze_info.get("gaze")
+            violations = gaze_info.get("violations", [])
+
+            if direction and direction != "center":
+                self.gaze_away += 1
+                logging.info(f"Gaze away detected ({direction})")
+
+            if violations:
+                penalty = len(violations) * 3
+                self.integrity_deducted += penalty
+                logging.info(
+                    f"Integrity deducted {penalty} for gaze violations {violations}"
+                )
+
+        except Exception as e:
+            logging.error(e)
+
         return frame_data, self.integrity_deducted, self.gaze_away
 
 # --- LangGraph Pydantic Models ---

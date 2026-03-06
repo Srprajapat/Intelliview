@@ -406,7 +406,16 @@ function endInterviewDueToViolation(reason) {
 
 document.addEventListener('fullscreenchange', () => { if (window.interviewStarted && !document.fullscreenElement) endInterviewDueToViolation('Fullscreen exited'); });
 document.addEventListener('visibilitychange', () => { if (window.interviewStarted && document.hidden) endInterviewDueToViolation('Tab switched'); });
-
+document.addEventListener('contextmenu', e => { e.preventDefault(); endInterviewDueToViolation('Right-click detected'); });
+document.addEventListener('copy', e => { e.preventDefault(); endInterviewDueToViolation('Copy attempted'); });
+document.addEventListener('paste', e => { e.preventDefault(); endInterviewDueToViolation('Paste attempted'); });
+document.addEventListener('cut', e => { e.preventDefault(); endInterviewDueToViolation('Cut attempted'); });
+document.addEventListener('keydown', e => {
+    if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J' || e.key === 'C')) || (e.ctrlKey && e.key === 'u')) { 
+        e.preventDefault(); 
+        endInterviewDueToViolation('Developer tools opened');
+    }
+});
 function initializeInterview() {
     var video = document.getElementById('video');
     var canvas = document.getElementById('canvas');
